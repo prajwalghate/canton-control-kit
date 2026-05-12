@@ -1,0 +1,148 @@
+module Test.SmartAccountTest where
+
+import Daml.Script
+
+import Account.SmartAccount
+import Core.Types
+import Examples.DemoTransfer
+import Policy.PolicySafe
+
+smartAccountEndToEnd : Script ()
+smartAccountEndToEnd = script do
+  admin <- allocateParty "SmartAdmin"
+  account <- allocateParty "SmartAccountParty"
+  signerA <- allocateParty "SmartSignerA"
+  signerB <- allocateParty "SmartSignerB"
+  signerC <- allocateParty "SmartSignerC"
+  recipient <- allocateParty "SmartRecipient"
+  issuer <- allocateParty "SmartIssuer"
+
+  safeCid <- submit admin do
+    createCmd SafeAccount with
+      safeId = "SAFE-SMART-001"
+      safeAdmin = admin
+      accountParty = account
+      accountId = "SMART-001"
+      signers = [signerA, signerB, signerC]
+      threshold = Threshold with required = 2, total = 3
+      state = SafeActive
+      proposalCounter = 0
+
+  _smartAccountCid <- submit admin do
+    createCmd SmartAccount with
+      accountId = "SMART-001"
+      admin
+      account
+      policySafeCid = safeCid
+      nextNonce = 0
+
+  balanceCid <- submit account do
+    createCmd DemoBalance with
+      issuer
+      owner = account
+      asset = "USD"
+      amount = 50.0
+
+  (smartAccountCid1, proposalCid) <- submit account do
+    exerciseCmd _smartAccountCid SubmitOperation with
+      envelope = OperationEnvelope with
+        operationId = "SMART-OP-001"
+        accountId = "SMART-001"
+        nonce = 0
+        operations =
+          [ DemoTransferOp (DemoTransferCall with
+              sourceBalanceCid = balanceCid
+              recipient
+              amount = 15.0
+              asset = "USD"
+              note = Some "Initial controlled payment")
+          ]
+        submittedBy = account
+        description = "Submit through SmartAccount."
+        sessionKey = None
+        sponsor = None
+
+  proposalCid1 <- submit signerA do
+    exerciseCmd proposalCid Approve with signer = signerA, note = None
+
+  proposalCid2 <- submit signerB do
+    exerciseCmd proposalCid1 Approve with signer = signerB, note = None
+
+  receiptCid <- submit account do
+    exerciseCmd proposalCid2 Execute with executionNote = Some "Executed from smart-account test."
+
+  receipt <- queryContractId admin receiptCid
+  assertMsg "Execution receipt should be visible to the admin." (receipt /= None)
+
+  recipientBalances <- query @DemoBalance recipient
+  assertMsg "Recipient should receive one transferred balance." (length recipientBalances == 1)
+
+  remainingBalances <- query @DemoBalance account
+  assertMsg "Account should retain one remainder balance." (length remainingBalances == 1)
+
+  case remainingBalances of
+    [(_, remaining)] ->
+      assertMsg "Remaining amount should equal 35." (remaining.amount == 35.0)
+    _ ->
+      abort "Expected one remaining demo balance."
+
+  smartAccountState <- queryContractId admin smartAccountCid1
+  case smartAccountState of
+    Some updatedAccount ->
+      assertMsg "SmartAccount nonce should increment after submission." (updatedAccount.nextNonce == 1)
+    None ->
+      abort "Expected the updated SmartAccount contract."
+
+nonceReplayFails : Script ()
+nonceReplayFails = script do
+  admin <- allocateParty "ReplayAdmin"
+  account <- allocateParty "ReplayAccount"
+  signerA <- allocateParty "ReplaySignerA"
+  signerB <- allocateParty "ReplaySignerB"
+  recipient <- allocateParty "ReplayRecipient"
+  issuer <- allocateParty "ReplayIssuer"
+
+  safeCid <- submit admin do
+    createCmd SafeAccount with
+      safeId = "SAFE-REPLAY"
+      safeAdmin = admin
+      accountParty = account
+      accountId = "SMART-REPLAY"
+      signers = [signerA, signerB]
+      threshold = Threshold with required = 2, total = 2
+      state = SafeActive
+      proposalCounter = 0
+
+  smartAccountCid <- submit admin do
+    createCmd SmartAccount with
+      accountId = "SMART-REPLAY"
+      admin
+      account
+      policySafeCid = safeCid
+      nextNonce = 1
+
+  balanceCid <- submit account do
+    createCmd DemoBalance with
+      issuer
+      owner = account
+      asset = "USD"
+      amount = 20.0
+
+  submitMustFail account do
+    exerciseCmd smartAccountCid SubmitOperation with
+      envelope = OperationEnvelope with
+        operationId = "REPLAY-OP"
+        accountId = "SMART-REPLAY"
+        nonce = 0
+        operations =
+          [ DemoTransferOp (DemoTransferCall with
+              sourceBalanceCid = balanceCid
+              recipient
+              amount = 1.0
+              asset = "USD"
+              note = None)
+          ]
+        submittedBy = account
+        description = "Replay attempt."
+        sessionKey = None
+        sponsor = None

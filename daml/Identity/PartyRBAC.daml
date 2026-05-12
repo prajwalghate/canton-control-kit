@@ -1,0 +1,26 @@
+module Identity.PartyRBAC where
+
+data Permission
+  = SubmitOperations
+  | ApprovePolicies
+  | AdministerSafe
+  deriving (Eq, Show)
+
+data Role = Role
+  with
+    roleName : Text
+    permissions : [Permission]
+  deriving (Eq, Show)
+
+template RoleAssignment
+  with
+    admin : Party
+    member : Party
+    role : Role
+    delegatedBy : Optional Party
+  where
+    -- Stub for future work:
+    -- This module will become the bridge between Canton parties and
+    -- organization-level roles, delegation, and separation-of-duties policies.
+    signatory admin
+    observer member

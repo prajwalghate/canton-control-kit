@@ -1,0 +1,46 @@
+module Examples.DemoTransfer where
+
+template DemoBalance
+  with
+    issuer : Party
+    owner : Party
+    asset : Text
+    amount : Decimal
+  where
+    -- Authorization:
+    -- `owner` is the signatory because this demo balance models an account-owned
+    -- position. `issuer` is an observer so the issuer can see lifecycle changes
+    -- without being able to move funds unilaterally.
+    signatory owner
+    observer issuer
+
+    -- Authorization:
+    -- Only the balance owner can transfer out of this balance. The recipient is
+    -- not a stakeholder on the source contract and sees only the newly created
+    -- output balance.
+    choice Transfer : (ContractId DemoBalance, Optional (ContractId DemoBalance))
+      with
+        recipient : Party
+        transferAmount : Decimal
+        reference : Text
+      controller owner
+      do
+        assertMsg "Transfer amount must be positive." (transferAmount > 0.0)
+        assertMsg "Transfer amount exceeds the available demo balance." (transferAmount <= amount)
+
+        archive self
+
+        recipientCid <- create DemoBalance with
+          issuer
+          owner = recipient
+          asset
+          amount = transferAmount
+
+        remainderCid <-
+          if transferAmount == amount
+            then pure None
+            else do
+              remainder <- create this with amount = amount - transferAmount
+              pure (Some remainder)
+
+        pure (recipientCid, remainderCid)

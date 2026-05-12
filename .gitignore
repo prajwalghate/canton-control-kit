@@ -1,0 +1,8 @@
+.daml/
+dist/
+.canton/
+.cache/
+node_modules/
+coverage/
+.DS_Store
+*.log

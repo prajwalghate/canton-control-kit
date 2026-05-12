@@ -1,0 +1,160 @@
+module Test.PolicySafeTest where
+
+import Daml.Script
+
+import Core.Types
+import Examples.DemoTransfer
+import Policy.PolicySafe
+
+policySafeEndToEnd : Script ()
+policySafeEndToEnd = script do
+  admin <- allocateParty "PolicyAdmin"
+  account <- allocateParty "PolicyAccount"
+  signerA <- allocateParty "SignerA"
+  signerB <- allocateParty "SignerB"
+  signerC <- allocateParty "SignerC"
+  recipient <- allocateParty "Recipient"
+  issuer <- allocateParty "Issuer"
+
+  safeCid <- submit admin do
+    createCmd SafeAccount with
+      safeId = "SAFE-001"
+      safeAdmin = admin
+      accountParty = account
+      accountId = "ACCOUNT-001"
+      signers = [signerA, signerB, signerC]
+      threshold = Threshold with required = 2, total = 3
+      state = SafeActive
+      proposalCounter = 0
+
+  sourceBalanceCid <- submit account do
+    createCmd DemoBalance with
+      issuer
+      owner = account
+      asset = "USD"
+      amount = 100.0
+
+  (_updatedSafeCid, proposalCid) <- submit account do
+    exerciseCmd safeCid ProposeOperation with
+      envelope = OperationEnvelope with
+        operationId = "OP-001"
+        accountId = "ACCOUNT-001"
+        nonce = 0
+        operations =
+          [ DemoTransferOp (DemoTransferCall with
+              sourceBalanceCid
+              recipient
+              amount = 25.0
+              asset = "USD"
+              note = Some "Treasury payout")
+          ]
+        submittedBy = account
+        description = "Transfer 25 demo USD to recipient."
+        sessionKey = None
+        sponsor = None
+
+  proposalCid1 <- submit signerA do
+    exerciseCmd proposalCid Approve with
+      signer = signerA
+      note = Some "Approved by signer A"
+
+  proposalCid2 <- submit signerB do
+    exerciseCmd proposalCid1 Approve with
+      signer = signerB
+      note = Some "Approved by signer B"
+
+  receiptCid <- submit account do
+    exerciseCmd proposalCid2 Execute with
+      executionNote = Some "Executed from policy safe test."
+
+  receipt <- queryContractId admin receiptCid
+  assertMsg "Execution receipt should be visible to the admin." (receipt /= None)
+
+  case receipt of
+    Some executionReceipt -> do
+      assertMsg "Receipt should record the submitted nonce." (executionReceipt.receipt.nonce == 0)
+      assertMsg "Receipt should record two approvals." (length executionReceipt.receipt.approvals == 2)
+      assertMsg "Receipt should record one executed operation." (executionReceipt.receipt.operationCount == 1)
+    None ->
+      abort "Expected a policy execution receipt."
+
+  recipientBalances <- query @DemoBalance recipient
+  assertMsg "Recipient should receive one demo balance." (length recipientBalances == 1)
+
+  case recipientBalances of
+    [(_, balance)] -> do
+      assertMsg "Transferred amount should equal 25." (balance.amount == 25.0)
+      assertMsg "Transferred asset should be USD." (balance.asset == "USD")
+    _ ->
+      abort "Expected exactly one recipient balance."
+
+freezeBlocksNewProposals : Script ()
+freezeBlocksNewProposals = script do
+  admin <- allocateParty "FreezeAdmin"
+  account <- allocateParty "FreezeAccount"
+  signerA <- allocateParty "FreezeSignerA"
+  signerB <- allocateParty "FreezeSignerB"
+  recipient <- allocateParty "FreezeRecipient"
+  issuer <- allocateParty "FreezeIssuer"
+
+  safeCid <- submit admin do
+    createCmd SafeAccount with
+      safeId = "SAFE-FREEZE"
+      safeAdmin = admin
+      accountParty = account
+      accountId = "ACCOUNT-FREEZE"
+      signers = [signerA, signerB]
+      threshold = Threshold with required = 2, total = 2
+      state = SafeActive
+      proposalCounter = 0
+
+  balanceCid <- submit account do
+    createCmd DemoBalance with
+      issuer
+      owner = account
+      asset = "USD"
+      amount = 10.0
+
+  (activeSafeCid, _proposalCid) <- submit account do
+    exerciseCmd safeCid ProposeOperation with
+      envelope = OperationEnvelope with
+        operationId = "OP-FREEZE"
+        accountId = "ACCOUNT-FREEZE"
+        nonce = 7
+        operations =
+          [ DemoTransferOp (DemoTransferCall with
+              sourceBalanceCid = balanceCid
+              recipient
+              amount = 5.0
+              asset = "USD"
+              note = None)
+          ]
+        submittedBy = account
+        description = "Should be blocked by freeze."
+        sessionKey = None
+        sponsor = None
+
+  frozenSafeCid <- submit admin do
+    exerciseCmd activeSafeCid FreezeSafe
+
+  frozenSafe <- queryContractId admin frozenSafeCid
+  assertMsg "Frozen safe should be queryable." (frozenSafe /= None)
+
+  submitMustFail account do
+    exerciseCmd frozenSafeCid ProposeOperation with
+      envelope = OperationEnvelope with
+        operationId = "OP-FROZEN-BLOCKED"
+        accountId = "ACCOUNT-FREEZE"
+        nonce = 8
+        operations =
+          [ DemoTransferOp (DemoTransferCall with
+              sourceBalanceCid = balanceCid
+              recipient
+              amount = 1.0
+              asset = "USD"
+              note = None)
+          ]
+        submittedBy = account
+        description = "Frozen safe must reject new proposals."
+        sessionKey = None
+        sponsor = None

@@ -1,0 +1,272 @@
+module Policy.PolicySafe where
+
+import Core.Types
+import qualified Examples.DemoTransfer as Demo
+
+validateThreshold : Threshold -> Update ()
+validateThreshold threshold = do
+  assertMsg "Threshold.required must be positive." (threshold.required > 0)
+  assertMsg "Threshold.total must be positive." (threshold.total > 0)
+  assertMsg "Threshold.required cannot exceed Threshold.total." (threshold.required <= threshold.total)
+
+member : Eq a => a -> [a] -> Bool
+member _ [] = False
+member needle (x :: xs) = needle == x || member needle xs
+
+countApprovals : [Approval] -> Int
+countApprovals [] = 0
+countApprovals (_ :: xs) = 1 + countApprovals xs
+
+hasApproved : Party -> [Approval] -> Bool
+hasApproved _ [] = False
+hasApproved signer (approval :: rest) =
+  approval.signer == signer || hasApproved signer rest
+
+proposalStatusFor : Threshold -> [Approval] -> ProposalStatus
+proposalStatusFor threshold approvals =
+  if countApprovals approvals >= threshold.required
+    then ReadyToExecute
+    else PendingApproval
+
+ensureNonEmptyOperations : [Operation] -> Update ()
+ensureNonEmptyOperations operations =
+  assertMsg "Operation envelope must contain at least one operation." (countOperations operations > 0)
+
+countOperations : [Operation] -> Int
+countOperations [] = 0
+countOperations (_ :: xs) = 1 + countOperations xs
+
+executeOperation : Text -> Operation -> Update Text
+executeOperation operationId operation =
+  case operation of
+    DemoTransferOp transfer -> do
+      _ <- exercise transfer.sourceBalanceCid Demo.Transfer with
+        recipient = transfer.recipient
+        transferAmount = transfer.amount
+        reference = operationId
+      pure ("demo-transfer:" <> transfer.asset)
+
+executeOperations : Text -> [Operation] -> Update [Text]
+executeOperations _ [] = pure []
+executeOperations operationId (operation :: rest) = do
+  summary <- executeOperation operationId operation
+  summaries <- executeOperations operationId rest
+  pure (summary :: summaries)
+
+template SafeAccount
+  with
+    safeId : Text
+    safeAdmin : Party
+    accountParty : Party
+    accountId : Text
+    signers : [Party]
+    threshold : Threshold
+    state : SafeState
+    proposalCounter : Int
+  where
+    -- Authorization:
+    -- `admin` governs safe configuration while `account` is the application
+    -- execution party allowed to propose operations through the policy layer.
+    -- Signers are observers so they can see and approve proposals without
+    -- gaining unilateral configuration rights.
+    signatory safeAdmin
+    observer accountParty, signers
+
+    -- Authorization:
+    -- Only the bound application account can open a proposal on this safe.
+    -- Proposals inherit the current signer set and threshold as a snapshot.
+    choice ProposeOperation : (ContractId SafeAccount, ContractId SafeProposal)
+      with
+        envelope : OperationEnvelope
+      controller accountParty
+      do
+        validateThreshold threshold
+        ensureNonEmptyOperations envelope.operations
+        assertMsg "Safe is frozen and cannot accept new proposals." (state == SafeActive)
+        assertMsg "Operation envelope accountId does not match the SafeAccount." (envelope.accountId == accountId)
+        assertMsg "Operation envelope submittedBy must equal the configured account party." (envelope.submittedBy == accountParty)
+
+        now <- getTime
+
+        proposalCid <- create SafeProposal with
+          safeId
+          proposalAdmin = safeAdmin
+          proposalAccount = accountParty
+          accountId
+          signers
+          threshold
+          stateSnapshot = state
+          proposalNumber = proposalCounter + 1
+          proposer = accountParty
+          createdAt = now
+          approvals = []
+          status = PendingApproval
+          envelope
+
+        archive self
+        nextSafeCid <- create this with proposalCounter = proposalCounter + 1
+        pure (nextSafeCid, proposalCid)
+
+    -- Authorization:
+    -- Only the admin can freeze the safe. In this MVP, freeze blocks new
+    -- proposals. A later iteration can extend this to invalidate or gate
+    -- already-open proposals against live safe state.
+    choice FreezeSafe : ContractId SafeAccount
+      controller safeAdmin
+      do
+        assertMsg "Safe is already frozen." (state /= SafeFrozen)
+        archive self
+        newCid <- create this with state = SafeFrozen
+        pure newCid
+
+    -- Authorization:
+    -- Only the admin can unfreeze the safe after an emergency pause.
+    choice UnfreezeSafe : ContractId SafeAccount
+      controller safeAdmin
+      do
+        assertMsg "Safe is not frozen." (state == SafeFrozen)
+        archive self
+        newCid <- create this with state = SafeActive
+        pure newCid
+
+    -- Authorization:
+    -- Only the admin can rotate signers. New proposals will use the new signer
+    -- set; existing proposals continue to use their captured snapshot.
+    choice RotateSigner : ContractId SafeAccount
+      with
+        oldSigner : Party
+        newSigner : Party
+      controller safeAdmin
+      do
+        assertMsg "Old signer is not part of the safe." (member oldSigner signers)
+        assertMsg "New signer is already part of the safe." (not (member newSigner signers))
+        archive self
+        rotated <- create this with signers = replaceSigner oldSigner newSigner signers
+        pure rotated
+
+replaceSigner : Party -> Party -> [Party] -> [Party]
+replaceSigner _ _ [] = []
+replaceSigner oldSigner newSigner (signer :: rest) =
+  if signer == oldSigner
+    then newSigner :: rest
+    else signer :: replaceSigner oldSigner newSigner rest
+
+template SafeProposal
+  with
+    safeId : Text
+    proposalAdmin : Party
+    proposalAccount : Party
+    accountId : Text
+    signers : [Party]
+    threshold : Threshold
+    stateSnapshot : SafeState
+    proposalNumber : Int
+    proposer : Party
+    createdAt : Time
+    approvals : [Approval]
+    status : ProposalStatus
+    envelope : OperationEnvelope
+  where
+    -- Authorization:
+    -- The proposal is visible only to the admin, application account, and
+    -- signer set that must evaluate it. This keeps proposal metadata scoped to
+    -- direct stakeholders.
+    signatory proposalAdmin
+    observer proposalAccount, signers
+
+    -- Authorization:
+    -- A signer can approve exactly once. Approval is appended as immutable
+    -- evidence and the proposal status is recomputed from the threshold.
+    choice Approve : ContractId SafeProposal
+      with
+        signer : Party
+        note : Optional Text
+      controller signer
+      do
+        validateThreshold threshold
+        assertMsg "Signer is not authorized on this proposal." (member signer signers)
+        assertMsg "Signer has already approved this proposal." (not (hasApproved signer approvals))
+        assertMsg "Proposal was created from a frozen safe snapshot." (stateSnapshot == SafeActive)
+
+        now <- getTime
+        let updatedApprovals = approvals <> [Approval with signer, approvedAt = now, note]
+        proposalCid <- create this with
+          approvals = updatedApprovals
+          status = proposalStatusFor threshold updatedApprovals
+        archive self
+        pure proposalCid
+
+    -- Authorization:
+    -- Only the bound application account can execute the proposal, and only if
+    -- the captured proposal snapshot is still valid.
+    choice Execute : ContractId SafeExecutionReceipt
+      with
+        executionNote : Optional Text
+      controller proposalAccount
+      do
+        validateThreshold threshold
+        assertMsg "Proposal is not ready to execute." (status == ReadyToExecute)
+        assertMsg "Proposal was created from a frozen safe snapshot." (stateSnapshot == SafeActive)
+
+        _ <- executeOperations envelope.operationId envelope.operations
+
+        now <- getTime
+        let checks =
+              [ PolicyCheck with
+                  ruleName = "safe-snapshot-active"
+                  passed = stateSnapshot == SafeActive
+                  detail =
+                    if stateSnapshot == SafeActive
+                      then "Proposal originated from an active safe."
+                      else "Proposal originated from a frozen safe."
+              , PolicyCheck with
+                  ruleName = "account-match"
+                  passed = envelope.accountId == accountId
+                  detail =
+                    if envelope.accountId == accountId
+                      then "Envelope accountId matches the proposal account."
+                      else "Envelope accountId does not match the proposal account."
+              , PolicyCheck with
+                  ruleName = "threshold-met"
+                  passed = countApprovals approvals >= threshold.required
+                  detail =
+                    if countApprovals approvals >= threshold.required
+                      then "Approval threshold satisfied."
+                      else "Approval threshold not yet satisfied."
+              ]
+
+        receiptCid <- create SafeExecutionReceipt with
+          receiptAdmin = proposalAdmin
+          receiptAccount = proposalAccount
+          signers
+          receipt = ExecutionReceipt with
+            safeId
+            accountId
+            operationId = envelope.operationId
+            nonce = envelope.nonce
+            executedBy = proposalAccount
+            executedAt = now
+            approvals
+            decision = DecisionApproved
+            checks
+            operationCount = countOperations envelope.operations
+            summary =
+              case executionNote of
+                Some txt -> txt
+                None -> "Executed policy-approved operation batch."
+
+        archive self
+        pure receiptCid
+
+template SafeExecutionReceipt
+  with
+    receiptAdmin : Party
+    receiptAccount : Party
+    signers : [Party]
+    receipt : ExecutionReceipt
+  where
+    -- Authorization:
+    -- Receipts are visible to the same policy stakeholders that could see the
+    -- proposal, preserving auditability without widening disclosure.
+    signatory receiptAdmin
+    observer receiptAccount, signers

@@ -1,0 +1,78 @@
+module Core.Types where
+
+import Examples.DemoTransfer (DemoBalance)
+
+data Threshold = Threshold
+  with
+    required : Int
+    total : Int
+  deriving (Eq, Show)
+
+data SafeState
+  = SafeActive
+  | SafeFrozen
+  deriving (Eq, Show)
+
+data ProposalStatus
+  = PendingApproval
+  | ReadyToExecute
+  deriving (Eq, Show)
+
+data PolicyDecision
+  = DecisionApproved
+  | DecisionRejected
+  deriving (Eq, Show)
+
+data PolicyCheck = PolicyCheck
+  with
+    ruleName : Text
+    passed : Bool
+    detail : Text
+  deriving (Eq, Show)
+
+data Approval = Approval
+  with
+    signer : Party
+    approvedAt : Time
+    note : Optional Text
+  deriving (Eq, Show)
+
+data DemoTransferCall = DemoTransferCall
+  with
+    sourceBalanceCid : ContractId DemoBalance
+    recipient : Party
+    amount : Decimal
+    asset : Text
+    note : Optional Text
+  deriving (Eq, Show)
+
+data Operation
+  = DemoTransferOp DemoTransferCall
+  deriving (Eq, Show)
+
+data OperationEnvelope = OperationEnvelope
+  with
+    operationId : Text
+    accountId : Text
+    nonce : Int
+    operations : [Operation]
+    submittedBy : Party
+    description : Text
+    sessionKey : Optional Party
+    sponsor : Optional Party
+  deriving (Eq, Show)
+
+data ExecutionReceipt = ExecutionReceipt
+  with
+    safeId : Text
+    accountId : Text
+    operationId : Text
+    nonce : Int
+    executedBy : Party
+    executedAt : Time
+    approvals : [Approval]
+    decision : PolicyDecision
+    checks : [PolicyCheck]
+    operationCount : Int
+    summary : Text
+  deriving (Eq, Show)

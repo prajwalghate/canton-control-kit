@@ -1,0 +1,39 @@
+module Account.SmartAccount where
+
+import Core.Types
+import qualified Policy.PolicySafe as Policy
+
+template SmartAccount
+  with
+    accountId : Text
+    admin : Party
+    account : Party
+    policySafeCid : ContractId Policy.SafeAccount
+    nextNonce : Int
+  where
+    -- Authorization:
+    -- `admin` governs account deployment and linkage. `account` is the
+    -- application-facing execution identity that can submit operation envelopes.
+    signatory admin
+    observer account
+
+    -- Authorization:
+    -- Only the bound account party can submit operations. The smart account
+    -- performs replay protection locally and delegates policy enforcement to the
+    -- linked `PolicySafe`.
+    choice SubmitOperation : (ContractId SmartAccount, ContractId Policy.SafeProposal)
+      with
+        envelope : OperationEnvelope
+      controller account
+      do
+        assertMsg "Operation envelope accountId does not match this SmartAccount." (envelope.accountId == accountId)
+        assertMsg "Operation envelope submittedBy must equal the submitting account party." (envelope.submittedBy == account)
+        assertMsg "Replay protection failed: nonce does not match SmartAccount.nextNonce." (envelope.nonce == nextNonce)
+
+        (nextSafeCid, proposalCid) <- exercise policySafeCid Policy.ProposeOperation with envelope
+
+        archive self
+        updatedAccount <- create this with
+          nextNonce = nextNonce + 1
+          policySafeCid = nextSafeCid
+        pure (updatedAccount, proposalCid)
