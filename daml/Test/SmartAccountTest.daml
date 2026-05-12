@@ -5,7 +5,21 @@ import Daml.Script
 import Account.SmartAccount
 import Core.Types
 import Examples.DemoTransfer
+import PartyHosting.DecentralizedParty
 import Policy.PolicySafe
+
+mkHost : Text -> Party -> Text -> HostingParticipantRole -> HostedParticipant
+mkHost participantId operatorParty adminApiUrl role =
+  HostedParticipant with
+    participantId
+    operatorParty
+    adminApiUrl
+    role
+    permissions =
+      [ SubmitTopologyTransactions
+      , ObserveTopologyAudit
+      , ConfirmHostingHealth
+      ]
 
 smartAccountEndToEnd : Script ()
 smartAccountEndToEnd = script do
@@ -16,6 +30,22 @@ smartAccountEndToEnd = script do
   signerC <- allocateParty "SmartSignerC"
   recipient <- allocateParty "SmartRecipient"
   issuer <- allocateParty "SmartIssuer"
+
+  decentralizedPartyCid <- submit admin do
+    createCmd DecentralizedParty with
+      partyId = "SMART-TREASURY"
+      governedParty = account
+      partyAdmin = admin
+      participantHosts =
+        [ mkHost "participant1" signerA "http://participant1:10013" TopologyLeader
+        , mkHost "participant2" signerB "http://participant2:10023" VotingHost
+        , mkHost "participant3" signerC "http://participant3:10033" RecoveryHost
+        ]
+      confirmationRequired = 2
+      hostingState = HostingOperational
+      topologyNamespace = "local-dev"
+      hostingEpoch = 0
+      notes = Some "Smart account owner party"
 
   safeCid <- submit admin do
     createCmd SafeAccount with
@@ -33,6 +63,8 @@ smartAccountEndToEnd = script do
       accountId = "SMART-001"
       admin
       account
+      ownerPartyId = Some "SMART-TREASURY"
+      ownerPartyCid = Some decentralizedPartyCid
       policySafeCid = safeCid
       nextNonce = 0
 
@@ -102,6 +134,21 @@ nonceReplayFails = script do
   recipient <- allocateParty "ReplayRecipient"
   issuer <- allocateParty "ReplayIssuer"
 
+  decentralizedPartyCid <- submit admin do
+    createCmd DecentralizedParty with
+      partyId = "SMART-REPLAY-PARTY"
+      governedParty = account
+      partyAdmin = admin
+      participantHosts =
+        [ mkHost "participant1" signerA "http://participant1:10013" TopologyLeader
+        , mkHost "participant2" signerB "http://participant2:10023" VotingHost
+        ]
+      confirmationRequired = 2
+      hostingState = HostingOperational
+      topologyNamespace = "local-dev"
+      hostingEpoch = 0
+      notes = None
+
   safeCid <- submit admin do
     createCmd SafeAccount with
       safeId = "SAFE-REPLAY"
@@ -118,6 +165,8 @@ nonceReplayFails = script do
       accountId = "SMART-REPLAY"
       admin
       account
+      ownerPartyId = Some "SMART-REPLAY-PARTY"
+      ownerPartyCid = Some decentralizedPartyCid
       policySafeCid = safeCid
       nextNonce = 1
 

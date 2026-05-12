@@ -1,31 +1,59 @@
 version: "3.9"
 
 services:
-  canton:
+  domain:
     image: ${CANTON_IMAGE:-digitalasset/canton-open-source:3.4.0}
-    container_name: cck-canton
-    restart: unless-stopped
-    command:
-      - daemon
-      - --config
-      - /etc/canton/canton.conf
+    container_name: cck-domain
+    command: ["daemon", "--config", "/workspace/cli/canton/domain.conf"]
     volumes:
-      - ./docs:/workspace/docs:ro
-    environment:
-      CANTON_PARTICIPANT_ONE: participant1
-      CANTON_PARTICIPANT_TWO: participant2
+      - ./cli:/workspace/cli:ro
     ports:
       - "5011:5011"
       - "5012:5012"
-      - "5013:5013"
-      - "5014:5014"
-      - "7575:7575"
-    profiles:
-      - local
 
-# Note:
-# This repository intentionally keeps the first compose file lightweight because
-# image availability and Canton configuration vary across local installations.
-# Wire your participant/domain config into `/etc/canton/canton.conf` as part of
-# local environment setup, then run:
-#   docker compose --profile local up
+  participant1:
+    image: ${CANTON_IMAGE:-digitalasset/canton-open-source:3.4.0}
+    container_name: cck-participant1
+    command: ["daemon", "--config", "/workspace/cli/canton/participant1.conf"]
+    volumes:
+      - ./cli:/workspace/cli:ro
+    ports:
+      - "10013:10013"
+      - "10014:10014"
+
+  participant2:
+    image: ${CANTON_IMAGE:-digitalasset/canton-open-source:3.4.0}
+    container_name: cck-participant2
+    command: ["daemon", "--config", "/workspace/cli/canton/participant2.conf"]
+    volumes:
+      - ./cli:/workspace/cli:ro
+    ports:
+      - "10023:10023"
+      - "10024:10024"
+
+  participant3:
+    image: ${CANTON_IMAGE:-digitalasset/canton-open-source:3.4.0}
+    container_name: cck-participant3
+    command: ["daemon", "--config", "/workspace/cli/canton/participant3.conf"]
+    volumes:
+      - ./cli:/workspace/cli:ro
+    ports:
+      - "10033:10033"
+      - "10034:10034"
+
+  participant4:
+    image: ${CANTON_IMAGE:-digitalasset/canton-open-source:3.4.0}
+    container_name: cck-participant4
+    command: ["daemon", "--config", "/workspace/cli/canton/participant4.conf"]
+    volumes:
+      - ./cli:/workspace/cli:ro
+    ports:
+      - "10043:10043"
+      - "10044:10044"
+    profiles: ["extended"]
+
+# Notes:
+# - This compose file models a domain plus 3 hosted participants, with a fourth
+#   participant available for add-host demonstrations.
+# - The Canton config files under `cli/canton/` are templates intended to make
+#   the local topology easy to reason about and adapt.

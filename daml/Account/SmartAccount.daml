@@ -1,6 +1,7 @@
 module Account.SmartAccount where
 
 import Core.Types
+import qualified PartyHosting.DecentralizedParty as Hosting
 import qualified Policy.PolicySafe as Policy
 
 template SmartAccount
@@ -8,19 +9,25 @@ template SmartAccount
     accountId : Text
     admin : Party
     account : Party
+    ownerPartyId : Optional Text
+    ownerPartyCid : Optional (ContractId Hosting.DecentralizedParty)
     policySafeCid : ContractId Policy.SafeAccount
     nextNonce : Int
   where
     -- Authorization:
     -- `admin` governs account deployment and linkage. `account` is the
-    -- application-facing execution identity that can submit operation envelopes.
+    -- application-facing execution identity that can submit operation
+    -- envelopes. When configured, `ownerPartyCid` anchors this smart account to
+    -- a decentralized hosting record for the same party.
     signatory admin
     observer account
 
+    ensure nextNonce >= 0
+
     -- Authorization:
     -- Only the bound account party can submit operations. The smart account
-    -- performs replay protection locally and delegates policy enforcement to the
-    -- linked `PolicySafe`.
+    -- performs replay protection locally and delegates policy enforcement to
+    -- the linked `PolicySafe`.
     choice SubmitOperation : (ContractId SmartAccount, ContractId Policy.SafeProposal)
       with
         envelope : OperationEnvelope
@@ -30,6 +37,17 @@ template SmartAccount
         assertMsg "Operation envelope submittedBy must equal the submitting account party." (envelope.submittedBy == account)
         assertMsg "Replay protection failed: nonce does not match SmartAccount.nextNonce." (envelope.nonce == nextNonce)
 
+        case (ownerPartyId, ownerPartyCid) of
+          (Some expectedPartyId, Some decentralizedPartyCid) -> do
+            ownerParty <- fetch decentralizedPartyCid
+            assertMsg "SmartAccount owner party id does not match the linked decentralized party." (ownerParty.partyId == expectedPartyId)
+            assertMsg "SmartAccount account party does not match the governed decentralized party." (ownerParty.governedParty == account)
+            assertMsg "SmartAccount owner party is in maintenance mode and cannot submit operations." (ownerParty.hostingState == Hosting.HostingOperational)
+          (None, None) ->
+            pure ()
+          _ ->
+            abort "SmartAccount owner party configuration is incomplete; set both ownerPartyId and ownerPartyCid together."
+
         (nextSafeCid, proposalCid) <- exercise policySafeCid Policy.ProposeOperation with envelope
 
         archive self
@@ -37,3 +55,23 @@ template SmartAccount
           nextNonce = nextNonce + 1
           policySafeCid = nextSafeCid
         pure (updatedAccount, proposalCid)
+
+    -- Authorization:
+    -- Only the admin can refresh the decentralized-party anchor after a
+    -- hosting governance change recreates the owner contract at a new contract
+    -- id.
+    choice RefreshOwnerParty : ContractId SmartAccount
+      with
+        newOwnerPartyCid : ContractId Hosting.DecentralizedParty
+      controller admin
+      do
+        ownerParty <- fetch newOwnerPartyCid
+        case ownerPartyId of
+          Some expectedPartyId -> do
+            assertMsg "Refreshed decentralized party does not match SmartAccount.ownerPartyId." (ownerParty.partyId == expectedPartyId)
+            assertMsg "Refreshed decentralized party does not govern the SmartAccount account party." (ownerParty.governedParty == account)
+          None ->
+            assertMsg "Cannot refresh owner party when ownerPartyId is not configured." False
+
+        archive self
+        create this with ownerPartyCid = Some newOwnerPartyCid

@@ -1,0 +1,368 @@
+module PartyHosting.DecentralizedParty where
+
+countText : [Text] -> Int
+countText [] = 0
+countText (_ :: rest) = 1 + countText rest
+
+countParties : [Party] -> Int
+countParties [] = 0
+countParties (_ :: rest) = 1 + countParties rest
+
+memberText : Text -> [Text] -> Bool
+memberText _ [] = False
+memberText needle (candidate :: rest) = needle == candidate || memberText needle rest
+
+memberParty : Party -> [Party] -> Bool
+memberParty _ [] = False
+memberParty needle (candidate :: rest) = needle == candidate || memberParty needle rest
+
+uniqueTexts : [Text] -> Bool
+uniqueTexts [] = True
+uniqueTexts (candidate :: rest) = not (memberText candidate rest) && uniqueTexts rest
+
+uniqueParties : [Party] -> Bool
+uniqueParties [] = True
+uniqueParties (candidate :: rest) = not (memberParty candidate rest) && uniqueParties rest
+
+data HostingParticipantRole
+  = TopologyLeader
+  | VotingHost
+  | RecoveryHost
+  deriving (Eq, Show)
+
+data HostingPermission
+  = SubmitTopologyTransactions
+  | ObserveTopologyAudit
+  | ConfirmHostingHealth
+  deriving (Eq, Show)
+
+data HostedParticipant = HostedParticipant
+  with
+    participantId : Text
+    operatorParty : Party
+    adminApiUrl : Text
+    role : HostingParticipantRole
+    permissions : [HostingPermission]
+  deriving (Eq, Show)
+
+data HostingState
+  = HostingOperational
+  | HostingMaintenance
+  deriving (Eq, Show)
+
+data RemoveHostedParticipant = RemoveHostedParticipant
+  with
+    participantId : Text
+  deriving (Eq, Show)
+
+data UpdateHostedParticipantRole = UpdateHostedParticipantRole
+  with
+    participantId : Text
+    newRole : HostingParticipantRole
+  deriving (Eq, Show)
+
+data RotateHostedParticipantOperator = RotateHostedParticipantOperator
+  with
+    participantId : Text
+    newOperatorParty : Party
+  deriving (Eq, Show)
+
+data UpdateHostingThreshold = UpdateHostingThreshold
+  with
+    newRequired : Int
+  deriving (Eq, Show)
+
+data UpdateHostingState = UpdateHostingState
+  with
+    newState : HostingState
+    reason : Text
+  deriving (Eq, Show)
+
+data HostingChange
+  = AddHost HostedParticipant
+  | RemoveHost RemoveHostedParticipant
+  | UpdateHostRole UpdateHostedParticipantRole
+  | RotateHostOperator RotateHostedParticipantOperator
+  | ChangeHostingThreshold UpdateHostingThreshold
+  | ChangeHostingState UpdateHostingState
+  deriving (Eq, Show)
+
+participantIds : [HostedParticipant] -> [Text]
+participantIds [] = []
+participantIds (host :: rest) = host.participantId :: participantIds rest
+
+participantOperators : [HostedParticipant] -> [Party]
+participantOperators [] = []
+participantOperators (host :: rest) = host.operatorParty :: participantOperators rest
+
+countHosts : [HostedParticipant] -> Int
+countHosts [] = 0
+countHosts (_ :: rest) = 1 + countHosts rest
+
+memberParticipantId : Text -> [HostedParticipant] -> Bool
+memberParticipantId _ [] = False
+memberParticipantId needle (host :: rest) =
+  host.participantId == needle || memberParticipantId needle rest
+
+memberParticipantOperator : Party -> [HostedParticipant] -> Bool
+memberParticipantOperator _ [] = False
+memberParticipantOperator needle (host :: rest) =
+  host.operatorParty == needle || memberParticipantOperator needle rest
+
+assertValidHostedParticipants : [HostedParticipant] -> Update ()
+assertValidHostedParticipants hosts = do
+  assertMsg "At least one hosting participant must be configured." (countHosts hosts > 0)
+  assertMsg "Hosting participant ids must be unique." (uniqueTexts (participantIds hosts))
+  assertMsg "Hosting operator parties must be unique." (uniqueParties (participantOperators hosts))
+
+assertValidThreshold : Int -> [HostedParticipant] -> Update ()
+assertValidThreshold required hosts = do
+  assertValidHostedParticipants hosts
+  assertMsg "Confirmation threshold must be positive." (required > 0)
+  assertMsg "Confirmation threshold cannot exceed the number of hosting participants." (required <= countHosts hosts)
+
+dedupeParties : [Party] -> [Party]
+dedupeParties [] = []
+dedupeParties (candidate :: rest) =
+  if memberParty candidate rest
+    then dedupeParties rest
+    else candidate :: dedupeParties rest
+
+requestObserverOperators : [HostedParticipant] -> HostingChange -> [Party]
+requestObserverOperators currentHosts change =
+  case change of
+    AddHost newHost -> dedupeParties (newHost.operatorParty :: participantOperators currentHosts)
+    RotateHostOperator rotateCall -> dedupeParties (rotateCall.newOperatorParty :: participantOperators currentHosts)
+    _ -> dedupeParties (participantOperators currentHosts)
+
+replaceParticipantRole : Text -> HostingParticipantRole -> [HostedParticipant] -> [HostedParticipant]
+replaceParticipantRole _ _ [] = []
+replaceParticipantRole participantId newRole (host :: rest) =
+  if host.participantId == participantId
+    then (host with role = newRole) :: rest
+    else host :: replaceParticipantRole participantId newRole rest
+
+replaceParticipantOperator : Text -> Party -> [HostedParticipant] -> [HostedParticipant]
+replaceParticipantOperator _ _ [] = []
+replaceParticipantOperator participantId newOperatorParty (host :: rest) =
+  if host.participantId == participantId
+    then (host with operatorParty = newOperatorParty) :: rest
+    else host :: replaceParticipantOperator participantId newOperatorParty rest
+
+removeParticipant : Text -> [HostedParticipant] -> [HostedParticipant]
+removeParticipant _ [] = []
+removeParticipant participantId (host :: rest) =
+  if host.participantId == participantId
+    then rest
+    else host :: removeParticipant participantId rest
+
+applyHostingChange : DecentralizedParty -> HostingChange -> Update DecentralizedParty
+applyHostingChange party change =
+  case change of
+    AddHost newHost -> do
+      assertMsg "Participant id is already configured on this decentralized party." (not (memberParticipantId newHost.participantId party.participantHosts))
+      assertMsg "Operator party is already configured on this decentralized party." (not (memberParticipantOperator newHost.operatorParty party.participantHosts))
+      let nextHosts = party.participantHosts <> [newHost]
+      assertValidThreshold party.confirmationRequired nextHosts
+      pure (party with participantHosts = nextHosts)
+
+    RemoveHost removeCall -> do
+      assertMsg "Cannot remove an unknown hosting participant." (memberParticipantId removeCall.participantId party.participantHosts)
+      let nextHosts = removeParticipant removeCall.participantId party.participantHosts
+      assertValidThreshold party.confirmationRequired nextHosts
+      pure (party with participantHosts = nextHosts)
+
+    UpdateHostRole updateCall -> do
+      assertMsg "Cannot update the role of an unknown hosting participant." (memberParticipantId updateCall.participantId party.participantHosts)
+      pure (party with participantHosts = replaceParticipantRole updateCall.participantId updateCall.newRole party.participantHosts)
+
+    RotateHostOperator rotateCall -> do
+      assertMsg "Cannot rotate an unknown hosting participant operator." (memberParticipantId rotateCall.participantId party.participantHosts)
+      assertMsg "New operator party is already assigned to another hosting participant." (not (memberParticipantOperator rotateCall.newOperatorParty party.participantHosts))
+      let nextHosts = replaceParticipantOperator rotateCall.participantId rotateCall.newOperatorParty party.participantHosts
+      assertValidHostedParticipants nextHosts
+      pure (party with participantHosts = nextHosts)
+
+    ChangeHostingThreshold thresholdCall -> do
+      assertValidThreshold thresholdCall.newRequired party.participantHosts
+      pure (party with confirmationRequired = thresholdCall.newRequired)
+
+    ChangeHostingState stateCall ->
+      pure (party with hostingState = stateCall.newState)
+
+template DecentralizedParty
+  with
+    partyId : Text
+    governedParty : Party
+    partyAdmin : Party
+    participantHosts : [HostedParticipant]
+    confirmationRequired : Int
+    hostingState : HostingState
+    topologyNamespace : Text
+    hostingEpoch : Int
+    notes : Optional Text
+  where
+    -- Authorization:
+    -- `partyAdmin` is the governance entry point for opening hosting-change
+    -- requests and recording topology activity. The governed party and all host
+    -- operators are observers so co-hosting stakeholders can inspect the live
+    -- hosting configuration without gaining unilateral mutation rights.
+    signatory partyAdmin
+    observer governedParty, participantOperators participantHosts
+
+    ensure
+      countHosts participantHosts > 0
+        && confirmationRequired > 0
+        && confirmationRequired <= countHosts participantHosts
+        && uniqueTexts (participantIds participantHosts)
+        && uniqueParties (participantOperators participantHosts)
+        && hostingEpoch >= 0
+
+    -- Authorization:
+    -- Only the party admin can open a hosting change request. The request does
+    -- not mutate the hosting configuration by itself; it creates a governed
+    -- object that can later be executed through `PolicySafe`.
+    choice RequestHostingChange : ContractId HostingChangeRequest
+      with
+        change : HostingChange
+        rationale : Text
+      controller partyAdmin
+      do
+        now <- getTime
+        create HostingChangeRequest with
+          targetCid = self
+          partyId
+          governedParty
+          partyAdmin
+          operatorObservers = requestObserverOperators participantHosts change
+          baselineEpoch = hostingEpoch
+          requestedBy = partyAdmin
+          requestedAt = now
+          rationale
+          change
+
+    -- Authorization:
+    -- Host operators record off-ledger topology submission activity here so the
+    -- contract model can audit who pushed which PartyToParticipant mapping
+    -- update without invoking the Canton Admin API from DAML.
+    choice RecordTopologySubmission : ContractId TopologySubmissionRecord
+      with
+        participantId : Text
+        operator : Party
+        topologyTransactionId : Optional Text
+        submissionReference : Text
+        note : Optional Text
+      controller operator
+      do
+        assertMsg "Only a configured hosting operator may record topology submission activity." (memberParticipantOperator operator participantHosts)
+        assertMsg "Topology submission participantId is not configured on this decentralized party." (memberParticipantId participantId participantHosts)
+        now <- getTime
+        create TopologySubmissionRecord with
+          partyAdmin
+          governedParty
+          operatorObservers = participantOperators participantHosts
+          partyId
+          participantId
+          operator
+          topologyTransactionId
+          submissionReference
+          note
+          recordedAt = now
+          hostingEpoch
+
+template HostingChangeRequest
+  with
+    targetCid : ContractId DecentralizedParty
+    partyId : Text
+    governedParty : Party
+    partyAdmin : Party
+    operatorObservers : [Party]
+    baselineEpoch : Int
+    requestedBy : Party
+    requestedAt : Time
+    rationale : Text
+    change : HostingChange
+  where
+    -- Authorization:
+    -- The request is visible only to the party admin, governed party, and host
+    -- operators that need to review the prospective hosting change.
+    signatory partyAdmin
+    observer governedParty, operatorObservers
+
+    -- Authorization:
+    -- `Apply` is intentionally narrow: the party admin executes it only after a
+    -- separate `PolicySafe` proposal has approved the hosting change.
+    choice Apply : (ContractId DecentralizedParty, ContractId HostingChangeReceipt)
+      controller partyAdmin
+      do
+        current <- fetch targetCid
+        assertMsg "Hosting change request targets a different decentralized party than expected." (current.partyId == partyId)
+        assertMsg "Hosting change request is stale; the decentralized party hosting epoch has advanced." (current.hostingEpoch == baselineEpoch)
+
+        nextParty <- applyHostingChange current change
+
+        archive targetCid
+        nextCid <- create nextParty with hostingEpoch = current.hostingEpoch + 1
+
+        now <- getTime
+        receiptCid <- create HostingChangeReceipt with
+          partyAdmin
+          governedParty
+          operatorObservers = participantOperators nextParty.participantHosts
+          partyId
+          baselineEpoch
+          nextEpoch = current.hostingEpoch + 1
+          appliedBy = partyAdmin
+          appliedAt = now
+          change
+          auditSummary = rationale
+          currentHosts = nextParty.participantHosts
+          confirmationRequired = nextParty.confirmationRequired
+          hostingState = nextParty.hostingState
+
+        archive self
+        pure (nextCid, receiptCid)
+
+template HostingChangeReceipt
+  with
+    partyAdmin : Party
+    governedParty : Party
+    operatorObservers : [Party]
+    partyId : Text
+    baselineEpoch : Int
+    nextEpoch : Int
+    appliedBy : Party
+    appliedAt : Time
+    change : HostingChange
+    auditSummary : Text
+    currentHosts : [HostedParticipant]
+    confirmationRequired : Int
+    hostingState : HostingState
+  where
+    -- Authorization:
+    -- Hosting receipts preserve the same narrow visibility as live hosting
+    -- state so infrastructure governance remains auditable but private.
+    signatory partyAdmin
+    observer governedParty, operatorObservers
+
+template TopologySubmissionRecord
+  with
+    partyAdmin : Party
+    governedParty : Party
+    operatorObservers : [Party]
+    partyId : Text
+    participantId : Text
+    operator : Party
+    topologyTransactionId : Optional Text
+    submissionReference : Text
+    note : Optional Text
+    recordedAt : Time
+    hostingEpoch : Int
+  where
+    -- Authorization:
+    -- This helper contract is an audit trail for off-ledger Canton Admin API
+    -- activity. It gives hosting operators a ledger-native place to anchor
+    -- topology submission references without widening visibility beyond the
+    -- hosting stakeholders.
+    signatory partyAdmin
+    observer governedParty, operatorObservers

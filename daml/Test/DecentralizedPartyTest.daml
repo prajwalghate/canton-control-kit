@@ -1,0 +1,220 @@
+module Test.DecentralizedPartyTest where
+
+import Daml.Script
+
+import Account.SmartAccount
+import Core.Types
+import Examples.DemoTransfer
+import PartyHosting.DecentralizedParty
+import Policy.PolicySafe
+
+mkHost : Text -> Party -> Text -> HostingParticipantRole -> HostedParticipant
+mkHost participantId operatorParty adminApiUrl role =
+  HostedParticipant with
+    participantId
+    operatorParty
+    adminApiUrl
+    role
+    permissions =
+      [ SubmitTopologyTransactions
+      , ObserveTopologyAudit
+      , ConfirmHostingHealth
+      ]
+
+decentralizedPartyEndToEnd : Script ()
+decentralizedPartyEndToEnd = script do
+  admin <- allocateParty "HostingAdmin"
+  treasuryParty <- allocateParty "TreasuryParty"
+  hostOp1 <- allocateParty "HostOperator1"
+  hostOp2 <- allocateParty "HostOperator2"
+  hostOp3 <- allocateParty "HostOperator3"
+  hostOp4 <- allocateParty "HostOperator4"
+  recipient <- allocateParty "TreasuryRecipient"
+  issuer <- allocateParty "TreasuryIssuer"
+
+  decentralizedPartyCid <- submit admin do
+    createCmd DecentralizedParty with
+      partyId = "TREASURY-PARTY"
+      governedParty = treasuryParty
+      partyAdmin = admin
+      participantHosts =
+        [ mkHost "participant1" hostOp1 "http://participant1:10013" TopologyLeader
+        , mkHost "participant2" hostOp2 "http://participant2:10023" VotingHost
+        , mkHost "participant3" hostOp3 "http://participant3:10033" RecoveryHost
+        ]
+      confirmationRequired = 2
+      hostingState = HostingOperational
+      topologyNamespace = "local-dev"
+      hostingEpoch = 0
+      notes = Some "Initial 3-host treasury party"
+
+  hostingSafeCid <- submit admin do
+    createCmd SafeAccount with
+      safeId = "SAFE-HOSTING-001"
+      safeAdmin = admin
+      accountParty = admin
+      accountId = "HOSTING-GOV-001"
+      signers = [hostOp1, hostOp2, hostOp3]
+      threshold = Threshold with required = 2, total = 3
+      state = SafeActive
+      proposalCounter = 0
+
+  hostingRequestCid <- submit admin do
+    exerciseCmd decentralizedPartyCid RequestHostingChange with
+      change = AddHost (mkHost "participant4" hostOp4 "http://participant4:10043" VotingHost)
+      rationale = "Add a fourth hosting participant for higher topology redundancy."
+
+  (_updatedHostingSafeCid, hostingProposalCid) <- submit admin do
+    exerciseCmd hostingSafeCid ProposeOperation with
+      envelope = OperationEnvelope with
+        operationId = "HOSTING-CHANGE-001"
+        accountId = "HOSTING-GOV-001"
+        nonce = 0
+        operations =
+          [ ApplyHostingChangeOp (HostingGovernanceCall with
+              decentralizedPartyCid
+              requestCid = hostingRequestCid
+              expectedPartyId = "TREASURY-PARTY"
+              note = Some "Add participant4 to the hosting set")
+          ]
+        submittedBy = admin
+        description = "Add a fourth participant host to the Treasury party."
+        sessionKey = None
+        sponsor = None
+
+  hostingProposalCid1 <- submit hostOp1 do
+    exerciseCmd hostingProposalCid Approve with signer = hostOp1, note = Some "Host operator 1 approved."
+
+  hostingProposalCid2 <- submit hostOp2 do
+    exerciseCmd hostingProposalCid1 Approve with signer = hostOp2, note = Some "Host operator 2 approved."
+
+  _hostingReceiptCid <- submit admin do
+    exerciseCmd hostingProposalCid2 Execute with executionNote = Some "Applied governed hosting change."
+
+  liveParties <- query @DecentralizedParty admin
+  case liveParties of
+    [(updatedPartyCid, updatedParty)] -> do
+      assertMsg "Hosting epoch should advance after the governed change." (updatedParty.hostingEpoch == 1)
+      assertMsg "Hosting configuration should contain four participants after the governed add-host change." (length updatedParty.participantHosts == 4)
+      assertMsg "Confirmation threshold should remain 2-of-4." (updatedParty.confirmationRequired == 2)
+
+      topologyRecordCid <- submit hostOp4 do
+        exerciseCmd updatedPartyCid RecordTopologySubmission with
+          participantId = "participant4"
+          operator = hostOp4
+          topologyTransactionId = Some "topology-tx-001"
+          submissionReference = "party-to-participant-map-treasury-v2"
+          note = Some "Recorded submission of the PartyToParticipant mapping update."
+
+      topologyRecord <- queryContractId admin topologyRecordCid
+      assertMsg "Topology submission record should be visible to the party admin." (topologyRecord /= None)
+
+      executionSafeCid <- submit admin do
+        createCmd SafeAccount with
+          safeId = "SAFE-TREASURY-EXEC-001"
+          safeAdmin = admin
+          accountParty = treasuryParty
+          accountId = "TREASURY-EXEC-001"
+          signers = [hostOp1, hostOp2, hostOp3]
+          threshold = Threshold with required = 2, total = 3
+          state = SafeActive
+          proposalCounter = 0
+
+      smartAccountCid <- submit admin do
+        createCmd SmartAccount with
+          accountId = "TREASURY-EXEC-001"
+          admin
+          account = treasuryParty
+          ownerPartyId = Some "TREASURY-PARTY"
+          ownerPartyCid = Some updatedPartyCid
+          policySafeCid = executionSafeCid
+          nextNonce = 0
+
+      balanceCid <- submit treasuryParty do
+        createCmd DemoBalance with
+          issuer
+          owner = treasuryParty
+          asset = "USD"
+          amount = 75.0
+
+      (_updatedSmartAccountCid, executionProposalCid) <- submit treasuryParty do
+        exerciseCmd smartAccountCid SubmitOperation with
+          envelope = OperationEnvelope with
+            operationId = "TREASURY-PAYOUT-001"
+            accountId = "TREASURY-EXEC-001"
+            nonce = 0
+            operations =
+              [ DemoTransferOp (DemoTransferCall with
+                  sourceBalanceCid = balanceCid
+                  recipient
+                  amount = 20.0
+                  asset = "USD"
+                  note = Some "Treasury payout approved by co-hosted governance")
+              ]
+            submittedBy = treasuryParty
+            description = "Execute a governed treasury payout."
+            sessionKey = None
+            sponsor = None
+
+      executionProposalCid1 <- submit hostOp1 do
+        exerciseCmd executionProposalCid Approve with signer = hostOp1, note = None
+
+      executionProposalCid2 <- submit hostOp2 do
+        exerciseCmd executionProposalCid1 Approve with signer = hostOp2, note = None
+
+      executionReceiptCid <- submit treasuryParty do
+        exerciseCmd executionProposalCid2 Execute with executionNote = Some "Executed treasury payout from co-hosted SmartAccount."
+
+      executionReceipt <- queryContractId admin executionReceiptCid
+      assertMsg "Execution receipt should exist for the governed SmartAccount payout." (executionReceipt /= None)
+
+      recipientBalances <- query @DemoBalance recipient
+      case recipientBalances of
+        [(_, receivedBalance)] ->
+          assertMsg "Recipient should receive the governed payout amount." (receivedBalance.amount == 20.0)
+        _ ->
+          abort "Expected a single recipient balance after the governed payout."
+    _ ->
+      abort "Expected exactly one live decentralized party after hosting change."
+
+staleHostingRequestFails : Script ()
+staleHostingRequestFails = script do
+  admin <- allocateParty "StaleHostingAdmin"
+  governedParty <- allocateParty "StaleTreasuryParty"
+  hostOp1 <- allocateParty "StaleHostOperator1"
+  hostOp2 <- allocateParty "StaleHostOperator2"
+  hostOp3 <- allocateParty "StaleHostOperator3"
+
+  decentralizedPartyCid <- submit admin do
+    createCmd DecentralizedParty with
+      partyId = "STALE-PARTY"
+      governedParty
+      partyAdmin = admin
+      participantHosts =
+        [ mkHost "participant1" hostOp1 "http://participant1:10013" TopologyLeader
+        , mkHost "participant2" hostOp2 "http://participant2:10023" VotingHost
+        , mkHost "participant3" hostOp3 "http://participant3:10033" RecoveryHost
+        ]
+      confirmationRequired = 2
+      hostingState = HostingOperational
+      topologyNamespace = "local-dev"
+      hostingEpoch = 0
+      notes = None
+
+  requestA <- submit admin do
+    exerciseCmd decentralizedPartyCid RequestHostingChange with
+      change = ChangeHostingThreshold (UpdateHostingThreshold with newRequired = 3)
+      rationale = "Raise confirmation threshold before applying other changes."
+
+  requestB <- submit admin do
+    exerciseCmd decentralizedPartyCid RequestHostingChange with
+      change = ChangeHostingState (UpdateHostingState with newState = HostingMaintenance, reason = "Temporarily pause hosting changes.")
+      rationale = "Pause hosting before maintenance."
+
+  (updatedPartyCid, _) <- submit admin do
+    exerciseCmd requestA Apply
+
+  _ <- queryContractId admin updatedPartyCid
+
+  submitMustFail admin do
+    exerciseCmd requestB Apply

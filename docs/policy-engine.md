@@ -2,24 +2,60 @@
 
 ## Purpose
 
-`PolicySafe` is application-level execution control. It is not party custody or operator control. It is meant to sit above participant hosting and below application business logic.
+`PolicySafe` is the execution-governance core of Canton Control Kit.
 
-## MVP Rules
+It is intentionally generic:
 
-- only the bound application account can propose and execute
-- only configured signers can approve
+- it can govern application actions such as transfers
+- it can also govern infrastructure actions such as hosting changes
+
+That makes it the bridge between secure infrastructure and secure application execution.
+
+## Current Capabilities
+
+- proposal creation
+- threshold approvals
+- proposal execution
+- safe freeze and unfreeze
+- signer rotation
+- execution receipts
+- governed hosting-change execution
+
+## Current Rules
+
+- only the bound execution account may propose and execute
+- only configured signers may approve
 - approvals are threshold-based
-- freeze blocks new proposals
-- approvals and execution are validated against the safe snapshot captured at proposal time
+- the signer set must be unique
+- proposals capture a snapshot of the safe state, signer set, and threshold
 
-## Why Propose -> Approve -> Execute
+## Why This Matters
 
-This pattern fits DAML well because it makes authorization and visibility explicit. Each stage becomes auditable, and contract stakeholders are easy to reason about under Canton privacy rules.
+Institutional systems rarely fail because a single transfer function is missing.
+
+They fail because there is no strong process around:
+
+- who can request a sensitive action
+- who must approve it
+- whether approval state is auditable
+- whether execution is separate from proposal
+
+`PolicySafe` is designed to make those control points explicit.
+
+## Governed Resources
+
+In the current repository, `PolicySafe` can execute:
+
+- `DemoTransferOp`
+- `ApplyHostingChangeOp`
+
+That second path is important. It means party-hosting changes are not treated as external governance theater. They are first-class governed operations in the same control plane.
 
 ## Planned Extensions
 
 - timelocks
 - amount caps
 - counterparty allowlists
-- richer policy-failure receipts
+- richer denial receipts
 - delegated approvals through `PartyRBAC`
+- typed policy plugins through interfaces

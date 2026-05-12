@@ -1,6 +1,7 @@
 module Core.Types where
 
 import Examples.DemoTransfer (DemoBalance)
+import PartyHosting.DecentralizedParty (DecentralizedParty, HostingChangeRequest)
 
 data Threshold = Threshold
   with
@@ -46,8 +47,17 @@ data DemoTransferCall = DemoTransferCall
     note : Optional Text
   deriving (Eq, Show)
 
+data HostingGovernanceCall = HostingGovernanceCall
+  with
+    decentralizedPartyCid : ContractId DecentralizedParty
+    requestCid : ContractId HostingChangeRequest
+    expectedPartyId : Text
+    note : Optional Text
+  deriving (Eq, Show)
+
 data Operation
   = DemoTransferOp DemoTransferCall
+  | ApplyHostingChangeOp HostingGovernanceCall
   deriving (Eq, Show)
 
 data OperationEnvelope = OperationEnvelope

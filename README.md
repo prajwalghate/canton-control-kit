@@ -1,59 +1,95 @@
 # Canton Control Kit
 
-Canton Control Kit is a modular open-source primitive stack for building safer institutional applications on Canton and DAML.
+Canton Control Kit is a modular open-source control plane for secure institutional applications on Canton and DAML.
 
-It provides reusable building blocks for smart accounts, policy-gated execution, multisig approvals, role-based permissions, transaction simulation, and privacy-aware queries.
+It combines two tightly integrated layers:
 
-**First MVP**: Policy-Gated Smart Account with proposal/approval/execution flow + execution receipts.
+- `Decentralized Party Hosting Layer`: governed co-hosting of the same party across multiple participant nodes
+- `Application Execution Control Layer`: SmartAccount plus PolicySafe for proposal, approval, execution, and receipts
 
-This is infrastructure, not a wallet or app. Applications compose these primitives into their own workflows.
+This pairing delivers defense-in-depth:
 
-## MVP Scope
+- infrastructure-level redundancy and decentralization
+- fine-grained application-level execution governance
 
-The initial repository implements a minimal but working primitive stack for:
+The project stands on its own. It is generic infrastructure, not a wallet, custody product, or end-user app.
 
-- `Smart Account Kernel`: nonce-gated operation submission that delegates execution control to policy.
-- `PolicySafe`: application-level multisig with proposal, approval, execute, freeze, unfreeze, and signer rotation.
-- `DemoTransfer`: a tiny example operation target used to prove the end-to-end flow locally.
-- `Tx Twin`: reserved as an off-ledger service area for simulation and privacy-impact previews.
+## Current Focus
 
-## Design Principles
+The repository now includes a proposal-ready MVP for:
 
-- Start minimal and modular so each primitive can later become its own package.
-- Use `Propose -> Approve -> Execute` flows rather than embedding privileged direct execution paths.
-- Keep replay protection mandatory on the smart-account layer.
-- Respect Canton privacy by making proposals and receipts visible only to the minimum stakeholder set.
-- Stay explicitly complementary to BitSafe Decentralization Manager. BitSafe can decentralize party hosting and operational control, while `PolicySafe` adds fine-grained application execution policy on top of those co-hosted or decentralized parties.
+- `DecentralizedParty`: co-hosted party metadata, hosting change requests, and topology submission audit records
+- `PolicySafe`: threshold approvals and policy-governed execution for both application operations and hosting changes
+- `SmartAccount`: nonce-gated operation submission anchored to a decentralized-party owner
+- `DemoTransfer`: a minimal execution target used to prove the end-to-end flow
+
+## Value Proposition
+
+Institutional Canton deployments usually need two different kinds of control:
+
+1. "Who is allowed to host and operate the party?"
+2. "Who is allowed to execute sensitive business actions on behalf of the party?"
+
+Canton Control Kit addresses both in one cohesive stack.
+
+- `DecentralizedParty` governs the hosting configuration of the party itself
+- `PolicySafe` governs execution of sensitive actions
+- `SmartAccount` provides replay-protected submission into that governance path
 
 ## Repository Layout
 
-- `daml/Core/Types.daml`: shared types for operations, approvals, receipts, and policy checks.
-- `daml/Account/SmartAccount.daml`: smart-account submission and nonce management.
-- `daml/Policy/PolicySafe.daml`: multisig policy safe and proposal lifecycle.
-- `daml/Examples/DemoTransfer.daml`: demo operation target for local end-to-end tests.
-- `daml/Test/*.daml`: DamlScript tests.
-- `docs/`: architectural notes and contributor guidance.
-- `docs/new-dev-guide.md`: onboarding guide for developers new to Canton and this repo.
+- `daml/Core/Types.daml`: shared operation, envelope, approval, and receipt types
+- `daml/PartyHosting/DecentralizedParty.daml`: co-hosted party state, hosting change requests, and hosting audit records
+- `daml/Policy/PolicySafe.daml`: proposal, approval, execution, and execution receipts
+- `daml/Account/SmartAccount.daml`: replay-protected account abstraction layer
+- `daml/Identity/PartyRBAC.daml`: RBAC placeholder for later extension
+- `daml/Examples/DemoTransfer.daml`: demo execution target
+- `daml/Test/DecentralizedPartyTest.daml`: hosting governance and multi-hosted end-to-end flow
+- `daml/Test/PolicySafeTest.daml`: policy-level tests
+- `daml/Test/SmartAccountTest.daml`: smart-account tests
+- `services/tx-twin/`: off-ledger simulation service area
+- `sdk/typescript/`: TypeScript SDK and topology helper scaffolding
+- `cli/`: CLI and local Canton topology templates
+- `docs/`: architecture, onboarding, and operating notes
 
 ## Local Development
 
-1. Install a DAML SDK that matches `sdk-version` in [`daml.yaml`](./daml.yaml).
-2. Build the package with `dpm build`.
-3. Run the example scripts with:
+1. Install the Digital Asset toolchain version pinned in [`daml.yaml`](./daml.yaml).
+2. Build the package:
+
+```bash
+dpm build
+```
+
+3. Run the DamlScript suite:
 
 ```bash
 dpm test
 ```
 
-4. Or run individual scripts explicitly with an IDE ledger:
+4. For a single script:
 
 ```bash
-dpm script --dar .daml/dist/canton-control-kit-0.1.0.dar --script-name Test.PolicySafeTest:policySafeEndToEnd --ide-ledger
-dpm script --dar .daml/dist/canton-control-kit-0.1.0.dar --script-name Test.SmartAccountTest:smartAccountEndToEnd --ide-ledger
+dpm script --dar .daml/dist/canton-control-kit-0.1.0.dar --script-name Test.DecentralizedPartyTest:decentralizedPartyEndToEnd --ide-ledger
 ```
 
-5. Use [`docker-compose.yml`](./docker-compose.yml) as the starting point for a local Canton node topology once the Docker images and local config are wired in your environment.
+## Multi-Participant Local Topology
+
+[`docker-compose.yml`](./docker-compose.yml) and [`docs/co-hosting.md`](./docs/co-hosting.md) now outline a local topology shape for:
+
+- one domain node
+- three participant nodes
+- one additional participant slot for redundancy growth
+
+The compose file is designed as a controlled starting point for local co-hosting experiments and proposal demonstrations.
 
 ## Status
 
-This MVP is intentionally narrow: one policy-gated smart-account flow, a demo operation type, and test coverage focused on authorization, nonce handling, and proposal execution. The current phase keeps proposal enforcement snapshot-based and avoids contract keys so the package remains compatible with the local compiler feature set we verified here.
+The current implementation is intentionally minimal but strongly extensible:
+
+- hosting changes are modeled as governed requests
+- hosting requests can be executed through `PolicySafe`
+- `SmartAccount` can be anchored to a decentralized-party owner
+- DamlScript coverage includes hosting governance and co-hosted execution flow
+
+Remaining future work includes richer policy plugins, live topology submission tooling, PartyRBAC integration, Tx Twin simulation, and GraphPQS.

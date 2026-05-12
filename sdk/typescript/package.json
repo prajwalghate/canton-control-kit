@@ -1,0 +1,14 @@
+{
+  "name": "@canton-control/typescript",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript helpers for Canton Control Kit topology and governance workflows.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
